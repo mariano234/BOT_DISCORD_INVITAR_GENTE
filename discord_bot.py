@@ -5,10 +5,11 @@ from discord.ext import commands
 
 class MyBot(commands.Bot):
     def __init__(self):
+        # En versiones nuevas, el bot ya se encarga de crear su propio árbol de comandos
         super().__init__(command_prefix="!", intents=discord.Intents.default())
-        self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        # Usamos el árbol que el bot ya trae integrado por defecto (self.tree)
         await self.tree.sync()
 
 bot = MyBot()
@@ -34,7 +35,7 @@ async def invite(interaction: discord.Interaction):
     except discord.Forbidden:
         await interaction.response.send_message("No pude enviarte el mensaje. Asegúrate de tener los DMs abiertos.", ephemeral=True)
 
-# Railway leerá la variable de entorno que configuraremos más adelante
+# Railway leerá la variable de entorno
 token = os.environ.get('DISCORD_TOKEN')
 if token:
     bot.run(token)
