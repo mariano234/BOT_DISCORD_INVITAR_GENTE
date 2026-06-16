@@ -39,7 +39,7 @@ async def invite_context_menu(interaction: discord.Interaction, message: discord
         # 2. Crear la invitación de 1 solo uso
         invite = await target_channel.create_invite(
             max_uses=1, 
-            max_age=86400, 
+            max_age=259200, 
             unique=True, 
             reason=f"Invitación creada por Admin {interaction.user} mediante menú de contexto para {usuario}"
         )
@@ -48,7 +48,7 @@ async def invite_context_menu(interaction: discord.Interaction, message: discord
         await usuario.send(
             f"¡Hola! Has sido invitado a **{interaction.guild.name}**.\n"
             f"Aquí tienes tu enlace de invitación: {invite.url}\n"
-            f"*Nota: Solo tiene un uso y caduca en 24h.*"
+            f"*Nota: Solo tiene un uso y caduca a los 3 días.*"
         )
         
         # 4. Respuesta oculta de confirmación para el admin
