@@ -47,8 +47,8 @@ async def invite_context_menu(interaction: discord.Interaction, message: discord
         # 3. Enviar el DM al usuario
         await usuario.send(
             f"¡Hola! Has sido invitado a **{interaction.guild.name}**.\n"
-            f"Aquí tienes tu invitación exclusiva: {invite.url}\n"
-            f"*Nota: Solo tiene un uso y entrarás directamente al canal #{target_channel.name}.*"
+            f"Aquí tienes tu enlace de invitación: {invite.url}\n"
+            f"*Nota: Solo tiene un uso y caduca en 24h.*"
         )
         
         # 4. Respuesta oculta de confirmación para el admin
