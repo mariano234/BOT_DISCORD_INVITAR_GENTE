@@ -5,37 +5,71 @@ from discord.ext import commands
 
 class MyBot(commands.Bot):
     def __init__(self):
-        # En versiones nuevas, el bot ya se encarga de crear su propio árbol de comandos
         super().__init__(command_prefix="!", intents=discord.Intents.default())
 
     async def setup_hook(self):
-        # Usamos el árbol que el bot ya trae integrado por defecto (self.tree)
+        # Registramos el comando de menú de contexto
+        self.tree.add_command(invite_context_menu)
         await self.tree.sync()
 
 bot = MyBot()
 
-@bot.tree.command(name="invite", description="Genera una invitación de un solo uso por privado")
-async def invite(interaction: discord.Interaction):
+# Creamos un menú de contexto que aparece al hacer clic derecho en un MENSAJE
+@app_commands.context_menu(name="Enviar Invitación")
+@app_commands.checks.has_permissions(administrator=True) # Solo para admins
+async def invite_context_menu(interaction: discord.Interaction, message: discord.Message):
+    # El usuario objetivo es el autor del mensaje al que le estamos haciendo clic derecho
+    usuario = message.author
+
     if interaction.guild is None:
         await interaction.response.send_message("Este comando solo funciona dentro de un servidor.", ephemeral=True)
         return
 
+    # 1. Leer el nombre del canal desde las variables de entorno (por defecto buscará '👋bienvenida')
+    nombre_canal_configurado = os.environ.get('CANAL_BIENVENIDA', '👋bienvenida')
+    
+    # Buscar el canal por su nombre exacto
+    target_channel = discord.utils.get(interaction.guild.text_channels, name=nombre_canal_configurado)
+    
+    # Si no encuentra el canal configurado, usa el canal donde se usó la app
+    if target_channel is None:
+        target_channel = interaction.channel
+
     try:
-        # Genera invitación de 1 uso, válida por 24 horas
-        invite = await interaction.channel.create_invite(
+        # 2. Crear la invitación de 1 solo uso
+        invite = await target_channel.create_invite(
             max_uses=1, 
             max_age=86400, 
             unique=True, 
-            reason=f"Solicitada por {interaction.user}"
+            reason=f"Invitación creada por Admin {interaction.user} mediante menú de contexto para {usuario}"
         )
         
-        await interaction.user.send(f"Aquí tienes tu invitación exclusiva para **{interaction.guild.name}**: {invite.url}\n*Nota: Solo tiene un uso y expirará en 24 horas.*")
-        await interaction.response.send_message("¡Listo! Revisa tus mensajes privados.", ephemeral=True)
+        # 3. Enviar el DM al usuario
+        await usuario.send(
+            f"¡Hola! Has sido invitado a **{interaction.guild.name}**.\n"
+            f"Aquí tienes tu invitación exclusiva: {invite.url}\n"
+            f"*Nota: Solo tiene un uso y entrarás directamente al canal #{target_channel.name}.*"
+        )
+        
+        # 4. Respuesta oculta de confirmación para el admin
+        await interaction.response.send_message(
+            f"✅ ¡Invitación generada para #{target_channel.name} y enviada por privado a **{usuario.name}**!", 
+            ephemeral=True
+        )
         
     except discord.Forbidden:
-        await interaction.response.send_message("No pude enviarte el mensaje. Asegúrate de tener los DMs abiertos.", ephemeral=True)
+        await interaction.response.send_message(
+            f"❌ No pude enviarle el mensaje a {usuario.mention}. Asegúrate de que tenga los DMs abiertos.", 
+            ephemeral=True
+        )
 
-# Railway leerá la variable de entorno
+# Manejador de errores si un no-admin intenta usarlo
+@invite_context_menu.error
+async def invite_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        await interaction.response.send_message("❌ No tienes permisos de Administrador para usar esta función.", ephemeral=True)
+
+# Ejecutar el Bot
 token = os.environ.get('DISCORD_TOKEN')
 if token:
     bot.run(token)
