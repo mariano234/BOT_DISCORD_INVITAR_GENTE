@@ -69,8 +69,8 @@ def registrar_actividad(user_id: int):
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members = True          # Para detectar la entrada de miembros
-        intents.message_content = True  # Para leer respuestas de verificación y mensajes
+        intents.members = True          # Para detectar entrada de miembros
+        intents.message_content = True  # Para leer respuestas de verificación
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -82,7 +82,7 @@ bot = MyBot()
 # --- EVENTO AUTOMÁTICO AL ENTRAR UN NUEVO MIEMBRO ---
 @bot.event
 async def on_member_join(member: discord.Member):
-    # 1. Anuncio en el canal de bienvenida (opcional)
+    # 1. Anuncio en canal de bienvenida (opcional)
     nombre_bienvenida = os.environ.get('CANAL_BIENVENIDA', '👋bienvenida')
     canal_bienvenida = discord.utils.get(member.guild.text_channels, name=nombre_bienvenida)
     
@@ -93,7 +93,7 @@ async def on_member_join(member: discord.Member):
             color=discord.Color.blue()
         )
         embed_bienvenida.set_thumbnail(url=member.display_avatar.url)
-        await canal_bienvenida.send(embed=embed_bienvenida)
+        await canal_bienvenida.send(embed_bienvenida)
 
     # 2. Búsqueda del canal de autenticación
     nombre_autenticacion = os.environ.get('CANAL_AUTENTICACION', '🛑autenticación')
@@ -103,13 +103,25 @@ async def on_member_join(member: discord.Member):
         print(f"Error: No se encontró el canal '{nombre_autenticacion}' en {member.guild.name}.")
         return
 
+    # 3. Dar permiso explícito al usuario para escribir EN HILOS (pero NO en el canal principal)
+    try:
+        await canal_autenticacion.set_permissions(
+            member,
+            view_channel=True,
+            read_message_history=True,
+            send_messages=False,                # Bloquea escribir en el canal principal
+            send_messages_in_threads=True       # PERMITE escribir dentro de su hilo
+        )
+    except discord.Forbidden:
+        print(f"Advertencia: El bot no tiene permiso 'Administrar Permisos' en #{canal_autenticacion.name}.")
+
     # Generar números aleatorios para la verificación
     num1 = random.randint(1, 10)
     num2 = random.randint(1, 10)
     resultado = num1 + num2
 
     try:
-        # Crear un Hilo Privado en el canal de autenticación exclusivo para el nuevo usuario
+        # Crear Hilo Privado exclusivo
         thread = await canal_autenticacion.create_thread(
             name=f"🔒-verificacion-{member.name}",
             type=discord.ChannelType.private_thread,
@@ -119,14 +131,14 @@ async def on_member_join(member: discord.Member):
         # Unir al usuario al hilo
         await thread.add_user(member)
 
-        # Guardar registro temporal en la base de datos
+        # Guardar en base de datos
         cursor.execute(
             "INSERT OR REPLACE INTO hilos_verificacion (thread_id, user_id, resultado) VALUES (?, ?, ?)",
             (thread.id, member.id, resultado)
         )
         conn.commit()
 
-        # Enviar el mensaje con la pregunta matemática
+        # Enviar pregunta
         embed_pregunta = discord.Embed(
             title="🔒 Verificación de Seguridad",
             description=(
@@ -141,7 +153,7 @@ async def on_member_join(member: discord.Member):
     except discord.Forbidden:
         print(f"Error: El bot carece de permisos para crear hilos privados en #{canal_autenticacion.name}.")
 
-# --- LECTURA DE MENSAJES Y RESPUESTAS ---
+# --- LECTURA DE RESPUESTAS ---
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -151,7 +163,7 @@ async def on_message(message: discord.Message):
     if message.guild:
         registrar_actividad(message.author.id)
 
-    # Procesar verificación si el mensaje proviene de un hilo privado
+    # Procesar verificación si proviene de un hilo privado
     if isinstance(message.channel, discord.Thread):
         cursor.execute("SELECT user_id, resultado FROM hilos_verificacion WHERE thread_id = ?", (message.channel.id,))
         fila = cursor.fetchone()
@@ -159,7 +171,6 @@ async def on_message(message: discord.Message):
         if fila:
             user_id, resultado_esperado = fila
 
-            # Comprobar que solo el usuario al que se evalúa pueda responder
             if message.author.id == user_id:
                 respuesta = message.content.strip()
 
@@ -170,17 +181,24 @@ async def on_message(message: discord.Message):
                     if rol:
                         try:
                             await message.author.add_roles(rol)
-                            await message.channel.send(f"🎉 ¡Respuesta correcta! Se te ha asignado el rol **{rol.name}**. Eliminando este canal...")
+                            await message.channel.send(f"🎉 ¡Respuesta correcta! Se te ha asignado el rol **{rol.name}**. Eliminando canal...")
                         except discord.Forbidden:
-                            await message.channel.send("⚠️ El bot no tiene permisos suficientes para asignarte el rol. Verifica la jerarquía de roles.")
+                            await message.channel.send("⚠️ El bot no tiene permisos suficientes para asignarte el rol. Revisa la jerarquía de roles.")
                     else:
                         await message.channel.send(f"⚠️ El rol **{nombre_rol}** no existe en el servidor.")
 
-                    # Limpiar registro en la base de datos
+                    # Limpiar base de datos
                     cursor.execute("DELETE FROM hilos_verificacion WHERE thread_id = ?", (message.channel.id,))
                     conn.commit()
 
-                    # Esperar 2 segundos y eliminar el hilo para no dejar residuos
+                    # Limpiar el permiso temporal asignado al usuario en el canal de autenticación
+                    if message.channel.parent:
+                        try:
+                            await message.channel.parent.set_permissions(message.author, overwrite=None)
+                        except Exception as e:
+                            print(f"Error al limpiar permiso temporal: {e}")
+
+                    # Esperar 2 segundos y eliminar el hilo privado
                     await asyncio.sleep(2)
                     await message.channel.delete()
 
