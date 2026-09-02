@@ -82,18 +82,19 @@ bot = MyBot()
 # --- EVENTO AUTOMÁTICO AL ENTRAR UN NUEVO MIEMBRO ---
 @bot.event
 async def on_member_join(member: discord.Member):
-    # 1. Anuncio en canal de bienvenida (opcional)
+    # 1. Anuncio en canal de bienvenida
     nombre_bienvenida = os.environ.get('CANAL_BIENVENIDA', '👋bienvenida')
     canal_bienvenida = discord.utils.get(member.guild.text_channels, name=nombre_bienvenida)
     
     if canal_bienvenida:
         embed_bienvenida = discord.Embed(
             title=f"¡Bienvenido/a a {member.guild.name}! 👋",
-            description=f"Hola {member.mention}, por favor dirígete al canal de autenticación para verificar tu cuenta.",
+            description=f"Hola {member.mention}, por favor dirígete al canal de autenticación para verificar tu cuenta y obtener acceso.",
             color=discord.Color.blue()
         )
         embed_bienvenida.set_thumbnail(url=member.display_avatar.url)
-        await canal_bienvenida.send(embed_bienvenida)
+        # Se asegura de pasar 'embed=embed_bienvenida' para que lo dibuje correctamente
+        await canal_bienvenida.send(embed=embed_bienvenida)
 
     # 2. Búsqueda del canal de autenticación
     nombre_autenticacion = os.environ.get('CANAL_AUTENTICACION', '🛑autenticación')
@@ -103,14 +104,14 @@ async def on_member_join(member: discord.Member):
         print(f"Error: No se encontró el canal '{nombre_autenticacion}' en {member.guild.name}.")
         return
 
-    # 3. Dar permiso explícito al usuario para escribir EN HILOS (pero NO en el canal principal)
+    # 3. Dar permiso explícito al usuario para escribir EN HILOS
     try:
         await canal_autenticacion.set_permissions(
             member,
             view_channel=True,
             read_message_history=True,
             send_messages=False,                # Bloquea escribir en el canal principal
-            send_messages_in_threads=True       # PERMITE escribir dentro de su hilo
+            send_messages_in_threads=True       # Permite escribir dentro de su hilo
         )
     except discord.Forbidden:
         print(f"Advertencia: El bot no tiene permiso 'Administrar Permisos' en #{canal_autenticacion.name}.")
@@ -138,7 +139,7 @@ async def on_member_join(member: discord.Member):
         )
         conn.commit()
 
-        # Enviar pregunta
+        # Enviar la tarjeta de pregunta al hilo
         embed_pregunta = discord.Embed(
             title="🔒 Verificación de Seguridad",
             description=(
@@ -181,7 +182,7 @@ async def on_message(message: discord.Message):
                     if rol:
                         try:
                             await message.author.add_roles(rol)
-                            await message.channel.send(f"🎉 ¡Respuesta correcta! Se te ha asignado el rol **{rol.name}**. Eliminando canal...")
+                            await message.channel.send(f"🎉 ¡Respuesta correcta! Se te ha asignado el rol **{rol.name}**. Eliminando este canal...")
                         except discord.Forbidden:
                             await message.channel.send("⚠️ El bot no tiene permisos suficientes para asignarte el rol. Revisa la jerarquía de roles.")
                     else:
