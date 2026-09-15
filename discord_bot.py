@@ -1,4 +1,5 @@
 import os
+import io
 import random
 import threading
 import sqlite3
@@ -31,7 +32,7 @@ def run_web_server():
 threading.Thread(target=run_web_server, daemon=True).start()
 
 # ==========================================
-# 2. BASE DE DATOS LOCAL Y CONFIGURACIÓN DINÁMICA
+# 2. BASE DE DATOS LOCAL Y CONFIGURACIÓN
 # ==========================================
 conn = sqlite3.connect('bot_database.db', check_same_thread=False)
 cursor = conn.cursor()
@@ -54,7 +55,7 @@ cursor.execute('''
     )
 ''')
 
-# Configuración del Servidor por BD
+# Configuración por servidor
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS configuracion (
         guild_id INTEGER PRIMARY KEY,
@@ -64,7 +65,7 @@ cursor.execute('''
     )
 ''')
 
-# Roles inmunes a la inactividad
+# Roles inmunes
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS roles_inmunes (
         guild_id INTEGER,
@@ -74,7 +75,6 @@ cursor.execute('''
 ''')
 conn.commit()
 
-# --- Funciones auxiliares de BD ---
 def registrar_actividad(user_id: int):
     now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute('''
@@ -101,8 +101,8 @@ def obtener_config(guild_id: int):
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members = True          # Auditoría de miembros y roles
-        intents.message_content = True  # Lectura de mensajes
+        intents.members = True          
+        intents.message_content = True  
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -111,14 +111,15 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-# --- Comando tradicional !sync para forzar aparición inmediata de Slash Commands ---
+# --- COMANDO INSTANTÁNEO DE SINCRONIZACIÓN (!sync) ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def sync(ctx):
+    bot.tree.copy_global_to(guild=ctx.guild)
     synced = await bot.tree.sync(guild=ctx.guild)
     await ctx.send(f"✅ ¡{len(synced)} comandos Slash sincronizados al instante en este servidor!")
 
-# --- TAREA PROGRAMADA: Auditoría cada 24 horas ---
+# --- TAREA PROGRAMADA: Auditoría nocturna de inactividad ---
 @tasks.loop(hours=24)
 async def comprobar_inactividad_task(bot_instance):
     await bot_instance.wait_until_ready()
@@ -131,7 +132,6 @@ async def comprobar_inactividad_task(bot_instance):
         if not rol_inactivo:
             continue
 
-        # Obtener IDs de roles inmunes
         cursor.execute("SELECT role_id FROM roles_inmunes WHERE guild_id = ?", (guild.id,))
         roles_inmunes_ids = [row[0] for row in cursor.fetchall()]
 
@@ -141,7 +141,6 @@ async def comprobar_inactividad_task(bot_instance):
             if member.bot:
                 continue
 
-            # Si posee un rol inmune, ignorar
             if any(role.id in roles_inmunes_ids for role in member.roles):
                 continue
 
@@ -150,12 +149,10 @@ async def comprobar_inactividad_task(bot_instance):
 
             if fila and fila[0]:
                 last_seen_dt = datetime.strptime(fila[0], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                dias_inactivo = (now - last_seen_dt).days
             else:
-                last_seen_dt = member.joined_at or now
+                dias_inactivo = 0
 
-            dias_inactivo = (now - last_seen_dt).days
-
-            # Asignar rol de inactividad
             if dias_inactivo >= dias_limite and rol_inactivo not in member.roles:
                 try:
                     await member.add_roles(rol_inactivo, reason=f"Inactividad automática > {dias_limite} días")
@@ -187,7 +184,7 @@ async def on_member_join(member: discord.Member):
         embed_bienvenida.set_thumbnail(url=member.display_avatar.url)
         await canal_bienvenida.send(embed=embed_bienvenida)
 
-    # 2. Hilo Privado de Autenticación
+    # 2. Hilo privado de autenticación
     nombre_autenticacion = os.environ.get('CANAL_AUTENTICACION', '🛑autenticación')
     canal_autenticacion = discord.utils.get(member.guild.text_channels, name=nombre_autenticacion)
 
@@ -245,28 +242,24 @@ async def on_message(message: discord.Message):
     if message.guild:
         registrar_actividad(message.author.id)
 
-        # RECUPERACIÓN AUTOMÁTICA: Retirar rol de inactivo al interactuar
         _, nombre_rol_inactivo, canal_logs_id = obtener_config(message.guild.id)
         rol_inactivo = discord.utils.get(message.guild.roles, name=nombre_rol_inactivo)
 
         if rol_inactivo and rol_inactivo in message.author.roles:
             try:
                 await message.author.remove_roles(rol_inactivo, reason="Re-activación automática por nuevo mensaje.")
-                
-                # Log de reactivación
                 if canal_logs_id:
                     canal_logs = message.guild.get_channel(canal_logs_id)
                     if canal_logs:
                         embed_reactivado = discord.Embed(
                             title="🎉 Usuario Reactivado",
-                            description=f"¡{message.author.mention} ha vuelto a hablar y ha recuperado su estado activo!",
+                            description=f"¡{message.author.mention} ha vuelto a hablar y se le ha retirado el estado Inactivo!",
                             color=discord.Color.green()
                         )
                         await canal_logs.send(embed=embed_reactivado)
             except discord.Forbidden:
                 pass
 
-    # Verificación en hilos
     if isinstance(message.channel, discord.Thread):
         cursor.execute("SELECT user_id, resultado FROM hilos_verificacion WHERE thread_id = ?", (message.channel.id,))
         fila = cursor.fetchone()
@@ -300,10 +293,9 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 # ==========================================
-# 4. COMANDOS SLASH DE GESTIÓN AVANZADA
+# 4. COMANDOS SLASH
 # ==========================================
 
-# --- Configuración Dinámica de Inactividad ---
 @bot.tree.command(name="config_inactividad", description="Configura los parámetros de inactividad del servidor")
 @app_commands.describe(
     dias="Días sin hablar para ser considerado inactivo",
@@ -332,7 +324,6 @@ async def config_inactividad(interaction: discord.Interaction, dias: int = None,
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# --- Añadir/Quitar Roles Inmunes ---
 @bot.tree.command(name="inmunidad_rol", description="Otorga o quita la inmunidad de inactividad a un rol (VIP, Staff, etc.)")
 @app_commands.describe(rol="El rol que deseas proteger o desproteger")
 @app_commands.checks.has_permissions(administrator=True)
@@ -349,7 +340,90 @@ async def inmunidad_rol(interaction: discord.Interaction, rol: discord.Role):
         conn.commit()
         await interaction.response.send_message(f"🛡️ El rol **{rol.name}** ahora es **INMUNE** a la inactividad.", ephemeral=True)
 
-# --- Leaderboard / Top Activos ---
+# --- COMANDO ACTUALIZADO: Genera un archivo .txt con TODOS los usuarios ---
+@bot.tree.command(name="lista_inactivos", description="Genera un informe en .txt con todos los usuarios inactivos")
+@app_commands.describe(dias="Número mínimo de días de inactividad (por defecto 30)")
+@app_commands.checks.has_permissions(administrator=True)
+async def lista_inactivos(interaction: discord.Interaction, dias: int = 30):
+    await interaction.response.defer(ephemeral=True)
+    now = datetime.now(timezone.utc)
+    inactivos_encontrados = []
+
+    for member in interaction.guild.members:
+        if member.bot:
+            continue
+
+        cursor.execute("SELECT last_seen FROM ultima_actividad WHERE user_id = ?", (member.id,))
+        fila = cursor.fetchone()
+
+        if fila and fila[0]:
+            last_seen_dt = datetime.strptime(fila[0], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            dias_calc = (now - last_seen_dt).days
+            if dias_calc >= dias:
+                inactivos_encontrados.append((member, dias_calc))
+
+    if not inactivos_encontrados:
+        await interaction.followup.send(f"✅ No hay ningún usuario registrado con más de **{dias}** días de inactividad.")
+        return
+
+    inactivos_encontrados.sort(key=lambda x: x[1], reverse=True)
+
+    # Construir el contenido del archivo TXT
+    lineas = []
+    lineas.append(f"INFORME DE USUARIOS INACTIVOS (+{dias} DÍAS)")
+    lineas.append(f"Servidor: {interaction.guild.name}")
+    lineas.append(f"Fecha del reporte: {now.strftime('%d/%m/%Y %H:%M UTC')}")
+    lineas.append(f"Total encontrados: {len(inactivos_encontrados)}")
+    lineas.append("=" * 60 + "\n")
+
+    for member, dias_calc in inactivos_encontrados:
+        lineas.append(f"• Usuario: {member.name} (ID: {member.id}) | Inactivo por: {dias_calc} días")
+
+    contenido = "\n".join(lineas)
+
+    # Convertir el texto a archivo adjunto en memoria
+    buffer = io.BytesIO(contenido.encode('utf-8'))
+    archivo = discord.File(fp=buffer, filename=f"inactivos_{dias}dias.txt")
+
+    await interaction.followup.send(
+        content=f"📋 Se han encontrado **{len(inactivos_encontrados)}** usuarios inactivos. Adjunto el informe completo en `.txt`:",
+        file=archivo
+    )
+
+@bot.tree.command(name="escanear_inactivos", description="Ejecuta un barrido para asignar el rol Inactivo a quienes superen el límite")
+@app_commands.checks.has_permissions(administrator=True)
+async def escanear_inactivos(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    dias_limite, nombre_rol_inactivo, _ = obtener_config(interaction.guild.id)
+    rol_inactivo = discord.utils.get(interaction.guild.roles, name=nombre_rol_inactivo)
+
+    if not rol_inactivo:
+        await interaction.followup.send(f"❌ El rol **{nombre_rol_inactivo}** no existe en el servidor. Créalo antes de escanear.")
+        return
+
+    now = datetime.now(timezone.utc)
+    asignados = 0
+
+    for member in interaction.guild.members:
+        if member.bot:
+            continue
+
+        cursor.execute("SELECT last_seen FROM ultima_actividad WHERE user_id = ?", (member.id,))
+        fila = cursor.fetchone()
+
+        if fila and fila[0]:
+            last_seen_dt = datetime.strptime(fila[0], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            dias_calc = (now - last_seen_dt).days
+            if dias_calc >= dias_limite and rol_inactivo not in member.roles:
+                try:
+                    await member.add_roles(rol_inactivo, reason=f"Escaneo manual: >{dias_limite} días inactivo.")
+                    asignados += 1
+                except discord.Forbidden:
+                    pass
+
+    await interaction.followup.send(f"🔍 **Escaneo completado.** Se ha asignado el rol **{rol_inactivo.name}** a **{asignados}** usuario(s) registrados por llevar más de {dias_limite} días inactivos.")
+
 @bot.tree.command(name="top_activos", description="Muestra la clasificación de los usuarios más activos del servidor")
 async def top_activos(interaction: discord.Interaction):
     cursor.execute("SELECT user_id, total_mensajes FROM ultima_actividad ORDER BY total_mensajes DESC LIMIT 10")
@@ -371,7 +445,6 @@ async def top_activos(interaction: discord.Interaction):
     embed.description = descripcion
     await interaction.response.send_message(embed=embed)
 
-# --- Métricas de Salud del Servidor ---
 @bot.tree.command(name="salud_servidor", description="Muestra estadísticas sobre el estado de actividad global del servidor")
 @app_commands.checks.has_permissions(administrator=True)
 async def salud_servidor(interaction: discord.Interaction):
@@ -394,7 +467,6 @@ async def salud_servidor(interaction: discord.Interaction):
 
     await interaction.followup.send(embed=embed)
 
-# --- Ficha Individual de Usuario ---
 @bot.tree.command(name="actividad_usuario", description="Muestra información detallada sobre la actividad de un miembro")
 async def actividad_usuario(interaction: discord.Interaction, usuario: discord.Member):
     cursor.execute("SELECT last_seen, total_mensajes FROM ultima_actividad WHERE user_id = ?", (usuario.id,))
@@ -410,9 +482,8 @@ async def actividad_usuario(interaction: discord.Interaction, usuario: discord.M
         fecha_str = last_seen_dt.strftime('%d/%m/%Y %H:%M UTC')
         mensajes = fila[1]
     else:
-        last_seen_dt = usuario.joined_at or now
-        dias_inactivo = (now - last_seen_dt).days
-        fecha_str = "Sin mensajes registrados"
+        dias_inactivo = 0
+        fecha_str = "Sin mensajes registrados aún"
         mensajes = 0
 
     embed = discord.Embed(
