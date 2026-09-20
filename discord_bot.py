@@ -37,7 +37,6 @@ threading.Thread(target=run_web_server, daemon=True).start()
 conn = sqlite3.connect('bot_database.db', check_same_thread=False)
 cursor = conn.cursor()
 
-# Registro de actividad
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS ultima_actividad (
         user_id INTEGER PRIMARY KEY,
@@ -46,7 +45,6 @@ cursor.execute('''
     )
 ''')
 
-# Hilos de verificación pendientes
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS hilos_verificacion (
         thread_id INTEGER PRIMARY KEY,
@@ -55,7 +53,6 @@ cursor.execute('''
     )
 ''')
 
-# Configuración por servidor
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS configuracion (
         guild_id INTEGER PRIMARY KEY,
@@ -65,7 +62,6 @@ cursor.execute('''
     )
 ''')
 
-# Roles inmunes
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS roles_inmunes (
         guild_id INTEGER,
@@ -111,13 +107,17 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-# --- COMANDO INSTANTÁNEO DE SINCRONIZACIÓN (!sync) ---
+# --- LIMPIEZA Y SINCRONIZACIÓN DE COMANDOS DUPLICADOS (!sync) ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def sync(ctx):
-    bot.tree.copy_global_to(guild=ctx.guild)
-    synced = await bot.tree.sync(guild=ctx.guild)
-    await ctx.send(f"✅ ¡{len(synced)} comandos Slash sincronizados al instante en este servidor!")
+    # 1. Limpiar los comandos registrados específicamente en el servidor para evitar duplicados
+    bot.tree.clear_commands(guild=ctx.guild)
+    await bot.tree.sync(guild=ctx.guild)
+
+    # 2. Sincronizar de forma global limpia
+    synced = await bot.tree.sync()
+    await ctx.send(f"🧹 **¡Limpieza y sincronización completada!** Se han eliminado los comandos duplicados y se han activado {len(synced)} comandos globales.")
 
 # --- TAREA PROGRAMADA: Auditoría nocturna de inactividad ---
 @tasks.loop(hours=24)
@@ -171,7 +171,7 @@ async def comprobar_inactividad_task(bot_instance):
 async def on_member_join(member: discord.Member):
     registrar_actividad(member.id)
 
-    # 1. Bienvenida
+    # Bienvenida
     nombre_bienvenida = os.environ.get('CANAL_BIENVENIDA', '👋bienvenida')
     canal_bienvenida = discord.utils.get(member.guild.text_channels, name=nombre_bienvenida)
     
@@ -184,7 +184,7 @@ async def on_member_join(member: discord.Member):
         embed_bienvenida.set_thumbnail(url=member.display_avatar.url)
         await canal_bienvenida.send(embed=embed_bienvenida)
 
-    # 2. Hilo privado de autenticación
+    # Hilo privado de autenticación
     nombre_autenticacion = os.environ.get('CANAL_AUTENTICACION', '🛑autenticación')
     canal_autenticacion = discord.utils.get(member.guild.text_channels, name=nombre_autenticacion)
 
@@ -296,6 +296,51 @@ async def on_message(message: discord.Message):
 # 4. COMANDOS SLASH
 # ==========================================
 
+# --- COMANDO NUEVO: Escanear mensajes históricos del servidor ---
+@bot.tree.command(name="indexar_historial", description="Escanea los mensajes recientes para registrar la última actividad real de los usuarios")
+@app_commands.describe(limite_mensajes="Mensajes a revisar por cada canal de texto (por defecto 300)")
+@app_commands.checks.has_permissions(administrator=True)
+async def indexar_historial(interaction: discord.Interaction, limite_mensajes: int = 300):
+    await interaction.response.defer(ephemeral=True)
+
+    mensajes_revisados = 0
+    usuarios_actualizados = set()
+
+    for channel in interaction.guild.text_channels:
+        perms = channel.permissions_for(interaction.guild.me)
+        if not perms.read_message_history or not perms.view_channel:
+            continue
+
+        try:
+            async for message in channel.history(limit=limite_mensajes):
+                if message.author.bot:
+                    continue
+
+                user_id = message.author.id
+                msg_date_str = message.created_at.strftime('%Y-%m-%d %H:%M:%S')
+
+                cursor.execute("SELECT last_seen FROM ultima_actividad WHERE user_id = ?", (user_id,))
+                fila = cursor.fetchone()
+
+                if not fila:
+                    cursor.execute("INSERT INTO ultima_actividad (user_id, last_seen, total_mensajes) VALUES (?, ?, 1)", (user_id, msg_date_str))
+                    usuarios_actualizados.add(user_id)
+                else:
+                    if msg_date_str > fila[0]:
+                        cursor.execute("UPDATE ultima_actividad SET last_seen = ? WHERE user_id = ?", (msg_date_str, user_id))
+                        usuarios_actualizados.add(user_id)
+
+                mensajes_revisados += 1
+        except Exception:
+            pass
+
+    conn.commit()
+    await interaction.followup.send(
+        f"✅ **Indexación del historial completada.**\n"
+        f"• Mensajes analizados: **{mensajes_revisados}**\n"
+        f"• Usuarios con fecha real de interacción actualizada: **{len(usuarios_actualizados)}**"
+    )
+
 @bot.tree.command(name="config_inactividad", description="Configura los parámetros de inactividad del servidor")
 @app_commands.describe(
     dias="Días sin hablar para ser considerado inactivo",
@@ -340,7 +385,6 @@ async def inmunidad_rol(interaction: discord.Interaction, rol: discord.Role):
         conn.commit()
         await interaction.response.send_message(f"🛡️ El rol **{rol.name}** ahora es **INMUNE** a la inactividad.", ephemeral=True)
 
-# --- COMANDO ACTUALIZADO: Genera un archivo .txt con TODOS los usuarios ---
 @bot.tree.command(name="lista_inactivos", description="Genera un informe en .txt con todos los usuarios inactivos")
 @app_commands.describe(dias="Número mínimo de días de inactividad (por defecto 30)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -368,7 +412,6 @@ async def lista_inactivos(interaction: discord.Interaction, dias: int = 30):
 
     inactivos_encontrados.sort(key=lambda x: x[1], reverse=True)
 
-    # Construir el contenido del archivo TXT
     lineas = []
     lineas.append(f"INFORME DE USUARIOS INACTIVOS (+{dias} DÍAS)")
     lineas.append(f"Servidor: {interaction.guild.name}")
@@ -380,8 +423,6 @@ async def lista_inactivos(interaction: discord.Interaction, dias: int = 30):
         lineas.append(f"• Usuario: {member.name} (ID: {member.id}) | Inactivo por: {dias_calc} días")
 
     contenido = "\n".join(lineas)
-
-    # Convertir el texto a archivo adjunto en memoria
     buffer = io.BytesIO(contenido.encode('utf-8'))
     archivo = discord.File(fp=buffer, filename=f"inactivos_{dias}dias.txt")
 
@@ -498,7 +539,7 @@ async def actividad_usuario(interaction: discord.Interaction, usuario: discord.M
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# --- Menú Contextual: Enviar Invitación ---
+# --- Context Menu de Invitaciones ---
 @app_commands.context_menu(name="Enviar Invitación")
 @app_commands.checks.has_permissions(administrator=True)
 async def invite_context_menu(interaction: discord.Interaction, message: discord.Message):
