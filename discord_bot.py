@@ -4,7 +4,7 @@ import random
 import threading
 import sqlite3
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import discord
@@ -91,8 +91,18 @@ def obtener_config(guild_id: int):
         return 30, 'Inactivo', None
     return fila
 
+async def obtener_mencion_limpia(bot_obj, guild, user_id: int) -> str:
+    member = guild.get_member(user_id)
+    if member:
+        return member.mention
+    try:
+        user_fetched = await bot_obj.fetch_user(user_id)
+        return f"**{user_fetched.name}** *(salió del servidor)*"
+    except Exception:
+        return f"Usuario ID `{user_id}` *(fuera del servidor)*"
+
 # ==========================================
-# 3. BOT DE DISCORD Y TAREAS EN SEGUNDO PLANO
+# 3. BOT DE DISCORD Y TAREAS
 # ==========================================
 class MyBot(commands.Bot):
     def __init__(self):
@@ -107,19 +117,14 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-# --- LIMPIEZA Y SINCRONIZACIÓN DE COMANDOS DUPLICADOS (!sync) ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def sync(ctx):
-    # 1. Limpiar los comandos registrados específicamente en el servidor para evitar duplicados
     bot.tree.clear_commands(guild=ctx.guild)
     await bot.tree.sync(guild=ctx.guild)
-
-    # 2. Sincronizar de forma global limpia
     synced = await bot.tree.sync()
-    await ctx.send(f"🧹 **¡Limpieza y sincronización completada!** Se han eliminado los comandos duplicados y se han activado {len(synced)} comandos globales.")
+    await ctx.send(f"🧹 **¡Sincronización completada!** Se han activado {len(synced)} comandos globales sin duplicados.")
 
-# --- TAREA PROGRAMADA: Auditoría nocturna de inactividad ---
 @tasks.loop(hours=24)
 async def comprobar_inactividad_task(bot_instance):
     await bot_instance.wait_until_ready()
@@ -157,21 +162,20 @@ async def comprobar_inactividad_task(bot_instance):
                 try:
                     await member.add_roles(rol_inactivo, reason=f"Inactividad automática > {dias_limite} días")
                     if canal_logs:
+                        texto_usuario = await obtener_mencion_limpia(bot_instance, guild, member.id)
                         embed_log = discord.Embed(
                             title="🛑 Usuario marcado como Inactivo",
-                            description=f"El usuario {member.mention} ha superado los **{dias_inactivo}** días sin actividad.",
+                            description=f"El usuario {texto_usuario} ha superado los **{dias_inactivo}** días sin actividad.",
                             color=discord.Color.red()
                         )
                         await canal_logs.send(embed=embed_log)
                 except discord.Forbidden:
                     pass
 
-# --- EVENTO AL ENTRAR UN NUEVO MIEMBRO ---
 @bot.event
 async def on_member_join(member: discord.Member):
     registrar_actividad(member.id)
 
-    # Bienvenida
     nombre_bienvenida = os.environ.get('CANAL_BIENVENIDA', '👋bienvenida')
     canal_bienvenida = discord.utils.get(member.guild.text_channels, name=nombre_bienvenida)
     
@@ -184,7 +188,6 @@ async def on_member_join(member: discord.Member):
         embed_bienvenida.set_thumbnail(url=member.display_avatar.url)
         await canal_bienvenida.send(embed=embed_bienvenida)
 
-    # Hilo privado de autenticación
     nombre_autenticacion = os.environ.get('CANAL_AUTENTICACION', '🛑autenticación')
     canal_autenticacion = discord.utils.get(member.guild.text_channels, name=nombre_autenticacion)
 
@@ -233,7 +236,6 @@ async def on_member_join(member: discord.Member):
     except discord.Forbidden:
         pass
 
-# --- LECTURA DE MENSAJES Y RECUPERACIÓN AUTOMÁTICA ---
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -251,9 +253,10 @@ async def on_message(message: discord.Message):
                 if canal_logs_id:
                     canal_logs = message.guild.get_channel(canal_logs_id)
                     if canal_logs:
+                        texto_usuario = await obtener_mencion_limpia(bot, message.guild, message.author.id)
                         embed_reactivado = discord.Embed(
                             title="🎉 Usuario Reactivado",
-                            description=f"¡{message.author.mention} ha vuelto a hablar y se le ha retirado el estado Inactivo!",
+                            description=f"¡{texto_usuario} ha vuelto a hablar y se le ha retirado el estado Inactivo!",
                             color=discord.Color.green()
                         )
                         await canal_logs.send(embed=embed_reactivado)
@@ -296,23 +299,64 @@ async def on_message(message: discord.Message):
 # 4. COMANDOS SLASH
 # ==========================================
 
-# --- COMANDO NUEVO: Escanear mensajes históricos del servidor ---
-@bot.tree.command(name="indexar_historial", description="Escanea los mensajes recientes para registrar la última actividad real de los usuarios")
-@app_commands.describe(limite_mensajes="Mensajes a revisar por cada canal de texto (por defecto 300)")
+# --- COMANDO ALL-IN-ONE: PUESTA A PUNTO ---
+@bot.tree.command(name="puesta_a_punto", description="Ejecuta una indexación completa del historial y actualiza todos los roles de inactividad")
+@app_commands.describe(
+    criterio="Elige si deseas escanear por cantidad de mensajes o por meses de antigüedad",
+    valor="Número de mensajes por canal (ej. 500) o número de meses hacia atrás (ej. 3)"
+)
+@app_commands.choices(criterio=[
+    app_commands.Choice(name="Por número de mensajes por canal", value="mensajes"),
+    app_commands.Choice(name="Por meses de antigüedad hacia atrás", value="meses")
+])
 @app_commands.checks.has_permissions(administrator=True)
-async def indexar_historial(interaction: discord.Interaction, limite_mensajes: int = 300):
+async def puesta_a_punto(interaction: discord.Interaction, criterio: app_commands.Choice[str], valor: int):
     await interaction.response.defer(ephemeral=True)
 
-    mensajes_revisados = 0
+    canales = [c for c in interaction.guild.text_channels if c.permissions_for(interaction.guild.me).read_message_history and c.permissions_for(interaction.guild.me).view_channel]
+    total_canales = len(canales)
+
+    if total_canales == 0:
+        await interaction.followup.send("❌ El bot no tiene acceso a ningún canal de texto para leer el historial.")
+        return
+
+    now = datetime.now(timezone.utc)
+    fecha_limite = now - timedelta(days=valor * 30) if criterio.value == "meses" else None
+
+    mensajes_procesados = 0
     usuarios_actualizados = set()
+    last_update_time = asyncio.get_event_loop().time()
 
-    for channel in interaction.guild.text_channels:
-        perms = channel.permissions_for(interaction.guild.me)
-        if not perms.read_message_history or not perms.view_channel:
-            continue
-
+    # --- FASE 1: BARRA DE PROGRESO DE INDEXACIÓN ---
+    for i, channel in enumerate(canales, 1):
         try:
-            async for message in channel.history(limit=limite_mensajes):
+            porcentaje = int((i / total_canales) * 100)
+            bloques = int(porcentaje / 10)
+            barra = "█" * bloques + "░" * (10 - bloques)
+
+            current_time = asyncio.get_event_loop().time()
+            if current_time - last_update_time > 2.5 or i == 1 or i == total_canales:
+                last_update_time = current_time
+                embed_progreso = discord.Embed(
+                    title="⏳ Puesta a Punto en Proceso...",
+                    description=(
+                        f"**Fase 1/2: Indexando historial de mensajes**\n\n"
+                        f"`[{barra}]` **{porcentaje}%**\n"
+                        f"• Canal actual: {channel.mention} ({i}/{total_canales})\n"
+                        f"• Mensajes analizados: **{mensajes_procesados}**\n"
+                        f"• Usuarios con fecha actualizada: **{len(usuarios_actualizados)}**"
+                    ),
+                    color=discord.Color.gold()
+                )
+                await interaction.edit_original_response(embed=embed_progreso)
+
+            kwargs = {}
+            if criterio.value == "mensajes":
+                kwargs['limit'] = valor
+            else:
+                kwargs['after'] = fecha_limite
+
+            async for message in channel.history(**kwargs):
                 if message.author.bot:
                     continue
 
@@ -330,29 +374,83 @@ async def indexar_historial(interaction: discord.Interaction, limite_mensajes: i
                         cursor.execute("UPDATE ultima_actividad SET last_seen = ? WHERE user_id = ?", (msg_date_str, user_id))
                         usuarios_actualizados.add(user_id)
 
-                mensajes_revisados += 1
+                mensajes_procesados += 1
+
         except Exception:
             pass
 
     conn.commit()
-    await interaction.followup.send(
-        f"✅ **Indexación del historial completada.**\n"
-        f"• Mensajes analizados: **{mensajes_revisados}**\n"
-        f"• Usuarios con fecha real de interacción actualizada: **{len(usuarios_actualizados)}**"
+
+    # --- FASE 2: BARRIDO BIDIRECCIONAL DE ROLES ---
+    dias_limite, nombre_rol_inactivo, canal_logs_id = obtener_config(interaction.guild.id)
+    rol_inactivo = discord.utils.get(interaction.guild.roles, name=nombre_rol_inactivo)
+
+    asignados = 0
+    removidos = 0
+
+    if rol_inactivo:
+        cursor.execute("SELECT role_id FROM roles_inmunes WHERE guild_id = ?", (interaction.guild.id,))
+        roles_inmunes_ids = [row[0] for row in cursor.fetchall()]
+
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+
+            es_inmune = any(role.id in roles_inmunes_ids for role in member.roles)
+
+            cursor.execute("SELECT last_seen FROM ultima_actividad WHERE user_id = ?", (member.id,))
+            fila = cursor.fetchone()
+
+            if fila and fila[0]:
+                last_seen_dt = datetime.strptime(fila[0], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                dias_calc = (now - last_seen_dt).days
+            else:
+                dias_calc = 0
+
+            # Si es inactivo y no inmune
+            if dias_calc >= dias_limite and not es_inmune:
+                if rol_inactivo not in member.roles:
+                    try:
+                        await member.add_roles(rol_inactivo, reason=f"Puesta a punto: >{dias_limite} días inactivo")
+                        asignados += 1
+                    except discord.Forbidden:
+                        pass
+            # Si es activo o inmune
+            else:
+                if rol_inactivo in member.roles:
+                    try:
+                        await member.remove_roles(rol_inactivo, reason="Puesta a punto: Usuario activo/inmune")
+                        removidos += 1
+                    except discord.Forbidden:
+                        pass
+
+    # --- RESUMEN FINAL COMPLETO ---
+    embed_fin = discord.Embed(
+        title="🚀 Puesta a Punto Completada",
+        description="El servidor ha quedado completamente sincronizado y al día.",
+        color=discord.Color.green()
     )
+    embed_fin.add_field(name="Canales analizados", value=str(total_canales), inline=True)
+    embed_fin.add_field(name="Mensajes leídos", value=str(mensajes_procesados), inline=True)
+    embed_fin.add_field(name="Usuarios registrados", value=str(len(usuarios_actualizados)), inline=True)
+    embed_fin.add_field(name="Roles asignados (Inactivo)", value=str(asignados), inline=True)
+    embed_fin.add_field(name="Roles retirados (Reactivados)", value=str(removidos), inline=True)
+    embed_fin.add_field(name="Criterio aplicado", value=f"{valor} {criterio.value}", inline=False)
+
+    await interaction.edit_original_response(embed=embed_fin)
 
 @bot.tree.command(name="config_inactividad", description="Configura los parámetros de inactividad del servidor")
 @app_commands.describe(
     dias="Días sin hablar para ser considerado inactivo",
-    nombre_rol="Nombre del rol que se asignará automáticamente",
+    rol="Selecciona el rol que se asignará automáticamente",
     canal_logs="Canal para notificar altas y bajas de inactivos"
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def config_inactividad(interaction: discord.Interaction, dias: int = None, nombre_rol: str = None, canal_logs: discord.TextChannel = None):
+async def config_inactividad(interaction: discord.Interaction, dias: int = None, rol: discord.Role = None, canal_logs: discord.TextChannel = None):
     d_actual, r_actual, c_actual = obtener_config(interaction.guild.id)
 
     nuevos_dias = dias if dias is not None else d_actual
-    nuevo_rol = nombre_rol if nombre_rol is not None else r_actual
+    nuevo_rol = rol.name if rol is not None else r_actual
     nuevo_canal = canal_logs.id if canal_logs is not None else c_actual
 
     cursor.execute('''
@@ -431,7 +529,7 @@ async def lista_inactivos(interaction: discord.Interaction, dias: int = 30):
         file=archivo
     )
 
-@bot.tree.command(name="escanear_inactivos", description="Ejecuta un barrido para asignar el rol Inactivo a quienes superen el límite")
+@bot.tree.command(name="escanear_inactivos", description="Ejecuta un barrido para asignar y desasignar el rol Inactivo")
 @app_commands.checks.has_permissions(administrator=True)
 async def escanear_inactivos(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -443,12 +541,18 @@ async def escanear_inactivos(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ El rol **{nombre_rol_inactivo}** no existe en el servidor. Créalo antes de escanear.")
         return
 
+    cursor.execute("SELECT role_id FROM roles_inmunes WHERE guild_id = ?", (interaction.guild.id,))
+    roles_inmunes_ids = [row[0] for row in cursor.fetchall()]
+
     now = datetime.now(timezone.utc)
     asignados = 0
+    removidos = 0
 
     for member in interaction.guild.members:
         if member.bot:
             continue
+
+        es_inmune = any(role.id in roles_inmunes_ids for role in member.roles)
 
         cursor.execute("SELECT last_seen FROM ultima_actividad WHERE user_id = ?", (member.id,))
         fila = cursor.fetchone()
@@ -456,14 +560,29 @@ async def escanear_inactivos(interaction: discord.Interaction):
         if fila and fila[0]:
             last_seen_dt = datetime.strptime(fila[0], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
             dias_calc = (now - last_seen_dt).days
-            if dias_calc >= dias_limite and rol_inactivo not in member.roles:
+        else:
+            dias_calc = 0
+
+        if dias_calc >= dias_limite and not es_inmune:
+            if rol_inactivo not in member.roles:
                 try:
                     await member.add_roles(rol_inactivo, reason=f"Escaneo manual: >{dias_limite} días inactivo.")
                     asignados += 1
                 except discord.Forbidden:
                     pass
+        else:
+            if rol_inactivo in member.roles:
+                try:
+                    await member.remove_roles(rol_inactivo, reason="Escaneo manual: Usuario activo o inmune.")
+                    removidos += 1
+                except discord.Forbidden:
+                    pass
 
-    await interaction.followup.send(f"🔍 **Escaneo completado.** Se ha asignado el rol **{rol_inactivo.name}** a **{asignados}** usuario(s) registrados por llevar más de {dias_limite} días inactivos.")
+    await interaction.followup.send(
+        f"🔍 **Escaneo bidireccional completado.**\n"
+        f"• Roles asignados a inactivos: **{asignados}**\n"
+        f"• Roles retirados a usuarios activos/inmunes: **{removidos}**"
+    )
 
 @bot.tree.command(name="top_activos", description="Muestra la clasificación de los usuarios más activos del servidor")
 async def top_activos(interaction: discord.Interaction):
@@ -539,7 +658,7 @@ async def actividad_usuario(interaction: discord.Interaction, usuario: discord.M
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# --- Context Menu de Invitaciones ---
+# Context Menu de Invitaciones
 @app_commands.context_menu(name="Enviar Invitación")
 @app_commands.checks.has_permissions(administrator=True)
 async def invite_context_menu(interaction: discord.Interaction, message: discord.Message):
